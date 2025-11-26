@@ -1,0 +1,24 @@
+search_path: "./data/*.pdf"
+
+preamble: |
+  When answering, include the following metadata for every figure or table you reference:
+  - Figure or Table ID (e.g., 'Figure 2.3', 'Table 4.1')
+  - Section heading(s)
+  - Page number if available
+  - Exact caption or extract from the document
+  - Brief explanation of why it is relevant
+
+  If you cannot find an exact match that explicitly mentions the keyword(s),
+  then return the closest relevant figures or tables that conceptually match.
+  Only respond with "NONE FOUND" if you are confident there are no relevant
+  figures or tables anywhere in the document.
+
+questions:
+  - 'Find any figures or tables in this assessment that classifies or categorizes different aspects of "quality of life"'
+  - 'Find any figures or tables in this assessment that classifies or categorizes different aspects of "nature"'
+  - "Find any figures or tables in this assessment that classifies or categorizes different aspects of \"nature's contributions to people\" or \"ecosystem services\""
+  - 'Find any figures or tables in this assessment that classifies or categorizes different aspects of "indirect drivers" and/or "direct drivers"'
+  - 'Find any figures or tables in this assessment that classifies or categorizes different aspects of "scenarios" or "futures"'
+  - 'Find any figures or tables in this assessment that classifies or categorizes different aspects of "options for action" or "response options"'
+
+output_directory: "./output"
