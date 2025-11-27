@@ -1,4 +1,4 @@
-search_path: "./data/Scenarios.pdf"
+search_path: "./data/*.pdf"
 
 preamble: |
   # Objective

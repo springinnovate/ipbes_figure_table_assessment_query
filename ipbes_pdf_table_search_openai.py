@@ -1,3 +1,4 @@
+import tempfile
 from datetime import datetime
 import json
 from collections import defaultdict
@@ -10,6 +11,7 @@ import logging
 
 from openai import OpenAI
 from dotenv import load_dotenv
+from pypdf import PdfReader, PdfWriter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,15 +24,15 @@ logging.info("Initializing OpenAI client")
 CLIENT = OpenAI()
 
 
-def format_results(results):
-    out = []
-    for question, file_dict in results.items():
-        out.append(f"QUESTION: {question}")
-        for filename, answer in file_dict.items():
-            out.append(f"  FILE: {filename}")
-            out.append(f"    {answer}")
-        out.append("")
-    return "\n".join(out)
+# def format_results(results):
+#     out = []
+#     for question, file_dict in results.items():
+#         out.append(f"QUESTION: {question}")
+#         for filename, answer in file_dict.items():
+#             out.append(f"  FILE: {filename}")
+#             out.append(f"    {answer}")
+#         out.append("")
+#     return "\n".join(out)
 
 
 def format_results(filename, result_obj):
@@ -75,6 +77,62 @@ def load_config(path):
     }
 
 
+MAX_FILE_BYTES = 50 * 2**30
+
+
+def upload_pdf_to_vector_store(
+    client,
+    pdf_path,
+    vector_store_id,
+    max_bytes=MAX_FILE_BYTES,
+    pages_per_chunk=25,
+):
+    size = os.path.getsize(pdf_path)
+    if size <= max_bytes:
+        with open(pdf_path, "rb") as f:
+            file_resp = client.files.create(file=f, purpose="assistants")
+        vs_file = client.vector_stores.files.create_and_poll(
+            vector_store_id=vector_store_id,
+            file_id=file_resp.id,
+        )
+        return [vs_file]
+
+    reader = PdfReader(pdf_path)
+    results = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        writer = None
+        chunk_page_count = 0
+        chunk_index = 0
+        total_pages = len(reader.pages)
+
+        for i, page in enumerate(reader.pages):
+            if writer is None:
+                writer = PdfWriter()
+            writer.add_page(page)
+            chunk_page_count += 1
+
+            if chunk_page_count >= pages_per_chunk or i == total_pages - 1:
+                chunk_name = f"{Path(pdf_path).stem}_part_{chunk_index + 1}.pdf"
+                chunk_path = os.path.join(tmpdir, chunk_name)
+                with open(chunk_path, "wb") as out_f:
+                    writer.write(out_f)
+                writer = None
+                chunk_page_count = 0
+                chunk_index += 1
+
+                with open(chunk_path, "rb") as f:
+                    file_resp = client.files.create(
+                        file=f, purpose="assistants"
+                    )
+                vs_file = client.vector_stores.files.create_and_poll(
+                    vector_store_id=vector_store_id,
+                    file_id=file_resp.id,
+                )
+                results.append(vs_file)
+
+    return results
+
+
 def load_documents(search_path):
     logging.info("Listing existing vector stores from OpenAI")
     existing_vs = CLIENT.vector_stores.list()
@@ -89,7 +147,13 @@ def load_documents(search_path):
         if store_name in name_to_vs_id:
             vector_store_id = name_to_vs_id[store_name]
         else:
-            vector_store = CLIENT.vector_stores.create(name=store_name)
+            vector_store = CLIENT.vector_stores.create(
+                name=store_name,
+                expires_after={
+                    "anchor": "last_active_at",
+                    "days": 1,
+                },
+            )
             vector_store_id = vector_store.id
             file_response = CLIENT.files.create(
                 file=open(pdf_path, "rb"),
@@ -201,9 +265,7 @@ def main():
             output_str += format_results(filename, parsed)
 
             logging.info(f"Finished question for file={filename}")
-            break
         logging.info("Finished this question for one file")
-        break
 
     logging.info("All questions processed")
 
