@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from collections import defaultdict
 import argparse
 import yaml
@@ -11,11 +12,45 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [line %(lineno)d] %(message)s",
 )
 
 load_dotenv()
 os.environ["OPENAI_API_KEY"]
+logging.info("Initializing OpenAI client")
+CLIENT = OpenAI()
+
+
+def format_results(filename, result_obj):
+    try:
+        lines = []
+        results = result_obj.get("results")
+        if not isinstance(results, list):
+            raise ValueError("results not a list")
+
+        for res in results:
+            question = res.get("question", "<missing question>")
+            lines.append(f"QUESTION: {question}")
+            lines.append(f"  FILE: {filename}")
+
+            matches = res.get("matches")
+            if isinstance(matches, list):
+                for m in matches:
+                    lines.append(f'    ID: {m.get("id", "<missing id>")}')
+                    lines.append(f'      Section: {m.get("section", None)}')
+                    lines.append(f'      Page: {m.get("page", None)}')
+                    lines.append(
+                        f'      Caption: {m.get("caption", "<missing caption>")}'
+                    )
+                    lines.append(
+                        f'      Explanation: {m.get("explanation", "<missing explanation>")}'
+                    )
+            else:
+                lines.append(f"    MATCHES: {matches}")
+        return "\n".join(lines)
+    except Exception:
+        return "UNEXPECTED FORMAT:\n" + repr(result_obj)
 
 
 def load_config(path):
@@ -30,47 +65,37 @@ def load_config(path):
 
 
 def load_documents(search_path):
-    logging.info("Initializing OpenAI client")
-    client = OpenAI()
-    logging.info("Listing existing files from OpenAI")
-    existing_files = {
-        f.filename: f.id for f in client.files.list().data if f.filename
-    }
+    logging.info("Listing existing vector stores from OpenAI")
+    existing_vs = CLIENT.vector_stores.list()
+    name_to_vs_id = {vs.name: vs.id for vs in existing_vs.data}
+
     filename_to_openai_id = {}
-    logging.info("Scanning ./data for PDF files")
-    for pdf_path in glob.glob(search_path):
-        pdf_name = Path(pdf_path).name
-        if pdf_name in existing_files:
-            logging.info(f"File already uploaded, skipping: {pdf_name}")
-            filename_to_openai_id[pdf_name] = existing_files[pdf_name]
-            continue
-        logging.info(f"Uploading file: {pdf_name}")
-        uploaded_file = client.files.create(
-            file=open(pdf_path, "rb"), purpose="assistants"
-        )
-        logging.info(
-            f"Finished uploading file: {pdf_name} (id={uploaded_file.id})"
-        )
-        filename_to_openai_id[pdf_name] = uploaded_file.id
+    logging.info(f"Scanning {search_path} for PDF files")
+    for pdf_str_path in glob.glob(search_path):
+        pdf_path = Path(pdf_str_path)
+        store_name = f"vs_{pdf_path.name}"
+
+        if store_name in name_to_vs_id:
+            vector_store_id = name_to_vs_id[store_name]
+        else:
+            vector_store = CLIENT.vector_stores.create(name=store_name)
+            vector_store_id = vector_store.id
+            file_response = CLIENT.files.create(
+                file=open(pdf_path, "rb"),
+                purpose="assistants",
+            )
+            attach_response = CLIENT.vector_stores.files.create_and_poll(
+                vector_store_id=vector_store_id,
+                file_id=file_response.id,
+            )
+            logging.info(f"attach reponse: {attach_response}")
+
+        filename_to_openai_id[pdf_path.name] = vector_store_id
 
     if len(filename_to_openai_id) == 0:
-        raise ValueError(
-            f"The search path '{search_path}'' resulted in 0 files."
-        )
-
-    logging.info("Finished processing all documents")
+        raise ValueError(f"The search path '{search_path}'' found 0 files.")
+    logging.info(f"Finished uploading all files from {search_path}")
     return filename_to_openai_id
-
-
-def format_results(results):
-    out = []
-    for question, file_dict in results.items():
-        out.append(f"QUESTION: {question}")
-        for filename, answer in file_dict.items():
-            out.append(f"  FILE: {filename}")
-            out.append(f"    {answer}")
-        out.append("")
-    return "\n".join(out)
 
 
 def write_results(output_dir, text):
@@ -117,43 +142,53 @@ def main():
     filename_to_openai_id = load_documents(config["search_path"])
     logging.info(f"Loaded {len(filename_to_openai_id)} documents")
 
-    client = OpenAI()
-    logging.info("Creating assistant")
-    assistant = client.beta.assistants.create(
-        name="IPBES PDF QA", model="gpt-4o", tools=[{"type": "file_search"}]
-    )
-    logging.info(f"Assistant created with id={assistant.id}")
-
     results = defaultdict(dict)
 
-    for base_question in config["questions"]:
-        logging.info(f"Starting question: {base_question}")
-        full_question = config["preamble"] + "\n\n" + base_question
-        logging.info(full_question)
-        for filename, file_id in filename_to_openai_id.items():
-            logging.info(f"Asking question for file: {filename}")
-            response = client.responses.create(
-                model="gpt-4o",
-                input=[
+    for filename, vector_store_id in filename_to_openai_id.items():
+        vs = CLIENT.vector_stores.retrieve(vector_store_id)
+        logging.info(vs.file_counts)
+        for base_question in config["questions"]:
+            full_question = config["preamble"] + "\n\n" + base_question
+            logging.info(
+                f"Asking question for file: {filename}, with vector_store_id "
+                f"{vector_store_id} of a question {len(full_question)} "
+                f"characters long"
+            )
+            # this just does the search
+            # search_results = CLIENT.vector_stores.search(
+            #     vector_store_id=vector_store_id, query=full_question
+            # )
+            # answer = response.output[0].content[0].text
+            # logging.info(search_results)
+            # results[base_question][filename] = (
+            #     search_results.data[0].content[0].text
+            # )
+            response = CLIENT.responses.create(
+                model="gpt-5",
+                input=full_question,
+                tools=[
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_file",
-                                "file_id": file_id,
-                            },
-                            {
-                                "type": "input_text",
-                                "text": full_question,
-                            },
-                        ],
+                        "type": "file_search",
+                        "vector_store_ids": [vector_store_id],
                     }
                 ],
             )
+            msg = None
+            for item in response.output:
+                if getattr(item, "type", None) == "message":
+                    msg = item
+                    break
 
-            results[base_question][filename] = response.output_text
+            text = msg.content[0].text
 
-            logging.info(f"Got response for file={filename}, printing answer")
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            json_str = text[start:end]
+
+            parsed = json.loads(json_str)
+            logging.info(parsed)
+            results[base_question][filename] = parsed
+
             logging.info(f"Finished question for file={filename}")
             break
         logging.info("Finished this question for one file")

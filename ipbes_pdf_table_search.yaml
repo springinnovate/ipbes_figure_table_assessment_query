@@ -1,17 +1,50 @@
-search_path: "./data/*.pdf"
+search_path: "./data/Scenarios.pdf"
 
 preamble: |
-  When answering, include the following metadata for every figure or table you reference:
-  - Figure or Table ID (e.g., 'Figure 2.3', 'Table 4.1')
-  - Section heading(s)
-  - Page number if available
-  - Exact caption or extract from the document
-  - Brief explanation of why it is relevant
-
-  If you cannot find an exact match that explicitly mentions the keyword(s),
-  then return the closest relevant figures or tables that conceptually match.
-  Only respond with "NONE FOUND" if you are confident there are no relevant
-  figures or tables anywhere in the document.
+  # Objective
+  Enable users to query uploaded files for specific figures or tables that classify or categorize particular concepts, such as quality of life, nature, or related terms.
+  Begin with a concise checklist (3–7 bullets) of your planned approach before processing the queries; keep items conceptual, not implementation-level.
+  # Instructions
+  Given a set of questions, locate any figures or tables in the uploaded assessment documents that classify or categorize the aspects referenced in each question.
+  Before presenting results, confirm that the figures or tables selected are both relevant to the concepts in the questions and clearly referenced in the document; if validation is not met, self-correct and re-select where appropriate.
+  ## Metadata to Include (for Each Figure/Table)
+  - **ID**: Figure or Table ID (e.g., 'Figure 2.3', 'Table 4.1')
+  - **Section**: Section heading(s)
+  - **Page**: Page number if available; otherwise, use null
+  - **Caption**: Exact caption or extract from the document
+  - **Explanation**: Brief rationale for why the figure/table is relevant (e.g., "The figure divides quality-of-life indicators into specific categories referenced in the question.")
+  ## Special Instructions
+  - If no figure or table explicitly matches the keywords, return the closest conceptually relevant ones instead.
+  - Only respond with "NONE FOUND" for a question if you are confident that there are no relevant figures or tables in the document for that query.
+  - For any metadata that cannot be located (such as page number), set the value to null rather than omitting the field.
+  ## Result Ordering
+  - List results in the order the questions are provided.
+  - Within each question, present matching figures/tables in the order they appear in the document.
+  # Output Format
+  Respond with a JSON object in the following structure:
+  ```json
+  {
+  "results": [
+  {
+  "question": <string, the exact question>,
+  "matches": [
+  {
+  "id": <string, e.g., "Figure 2.3" or "Table 4.1">,
+  "section": <string or null, primary section heading(s)>,
+  "page": <integer or null, the page number>,
+  "caption": <string, the figure/table caption or extract>,
+  "explanation": <string, brief rationale for relevance>
+  },
+  ...
+  ]
+  },
+  ...
+  ]
+  }
+  ```
+  - If no relevant figures or tables are found for a question, set `matches` to the single string `"NONE FOUND"`.
+  - All fields must be present in each object; for fields with unavailable data, set to null.
+  Set reasoning_effort = medium to match the scope and complexity of this extraction task; keep internal steps concise and output explanations clear.
 
 questions:
   - 'Find any figures or tables in this assessment that classifies or categorizes different aspects of "quality of life"'
