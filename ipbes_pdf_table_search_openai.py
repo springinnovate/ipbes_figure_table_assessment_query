@@ -22,6 +22,17 @@ logging.info("Initializing OpenAI client")
 CLIENT = OpenAI()
 
 
+def format_results(results):
+    out = []
+    for question, file_dict in results.items():
+        out.append(f"QUESTION: {question}")
+        for filename, answer in file_dict.items():
+            out.append(f"  FILE: {filename}")
+            out.append(f"    {answer}")
+        out.append("")
+    return "\n".join(out)
+
+
 def format_results(filename, result_obj):
     try:
         lines = []
@@ -142,8 +153,8 @@ def main():
     filename_to_openai_id = load_documents(config["search_path"])
     logging.info(f"Loaded {len(filename_to_openai_id)} documents")
 
-    results = defaultdict(dict)
-
+    # formatted_results = defaultdict(dict)
+    output_str = ""
     for filename, vector_store_id in filename_to_openai_id.items():
         vs = CLIENT.vector_stores.retrieve(vector_store_id)
         logging.info(vs.file_counts)
@@ -187,7 +198,7 @@ def main():
 
             parsed = json.loads(json_str)
             logging.info(parsed)
-            results[base_question][filename] = parsed
+            output_str += format_results(filename, parsed)
 
             logging.info(f"Finished question for file={filename}")
             break
@@ -196,8 +207,7 @@ def main():
 
     logging.info("All questions processed")
 
-    formatted_results = format_results(results)
-    write_results(config["output_directory"], formatted_results)
+    write_results(config["output_directory"], output_str)
 
 
 if __name__ == "__main__":
