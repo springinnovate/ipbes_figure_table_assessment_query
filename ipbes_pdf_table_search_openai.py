@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 from datetime import datetime
 import json
@@ -8,7 +9,7 @@ from pathlib import Path
 import os
 import glob
 import logging
-
+import threading
 from openai import OpenAI
 from dotenv import load_dotenv
 from pypdf import PdfReader, PdfWriter
@@ -21,18 +22,81 @@ logging.basicConfig(
 load_dotenv()
 os.environ["OPENAI_API_KEY"]
 logging.info("Initializing OpenAI client")
-CLIENT = OpenAI()
+CLIENT = OpenAI(timeout=600.0)
+
+FILE_LOCK = threading.Lock()
 
 
-# def format_results(results):
-#     out = []
-#     for question, file_dict in results.items():
-#         out.append(f"QUESTION: {question}")
-#         for filename, answer in file_dict.items():
-#             out.append(f"  FILE: {filename}")
-#             out.append(f"    {answer}")
-#         out.append("")
-#     return "\n".join(out)
+def ask_one(base_question, filename, vector_store_id, config, path):
+    try:
+        vs = CLIENT.vector_stores.retrieve(vector_store_id)
+        logging.info(vs.file_counts)
+
+        full_question = config["preamble"] + "\n\n" + base_question
+        logging.info(
+            f"Asking question for file: {filename}, with vector_store_id "
+            f"{vector_store_id} of a question {len(full_question)} "
+            f"characters long"
+        )
+
+        response = CLIENT.responses.create(
+            model="gpt-5",
+            input=full_question,
+            tools=[
+                {
+                    "type": "file_search",
+                    "vector_store_ids": [vector_store_id],
+                }
+            ],
+        )
+
+        msg = None
+        for item in response.output:
+            if getattr(item, "type", None) == "message":
+                msg = item
+                break
+
+        if msg is None:
+            raise RuntimeError("no message in response")
+
+        text = msg.content[0].text
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start == -1 or end <= start:
+            raise RuntimeError("could not locate JSON in response text")
+
+        json_str = text[start:end]
+        parsed = json.loads(json_str)
+        output_str = format_results(filename, parsed) + "\n"
+    except Exception as e:
+        output_str = (
+            f'ERROR for question="{base_question}" ' f'file="{filename}": {e}\n'
+        )
+
+    with FILE_LOCK:
+        with open(path, "a") as f:
+            f.write(output_str)
+
+    logging.info(f"Finished question for file={filename}")
+
+
+def run_all(config, filename_to_openai_id, path, max_workers=4):
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for base_question in config["questions"]:
+            for filename, vector_store_id in filename_to_openai_id.items():
+                futures.append(
+                    executor.submit(
+                        ask_one,
+                        base_question,
+                        filename,
+                        vector_store_id,
+                        config,
+                        path,
+                    )
+                )
+        for f in futures:
+            f.result()
 
 
 def format_results(filename, result_obj):
@@ -182,6 +246,19 @@ def write_results(output_dir, text):
     return path
 
 
+def delete_all_files():
+    after = None
+    while True:
+        page = CLIENT.files.list(limit=100, after=after)
+        if not page.data:
+            break
+        for f in page.data:
+            CLIENT.files.delete(f.id)
+        if not getattr(page, "has_more", False):
+            break
+        after = page.last_id
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -209,7 +286,17 @@ def main():
     )
 
     parser.add_argument("config", help="Path to YAML configuration file.")
+    parser.add_argument(
+        "--delete_files",
+        action="store_true",
+        help="Delete all OpenAI files and exit.",
+    )
     args = parser.parse_args()
+
+    if args.delete_files:
+        delete_all_files()
+        return
+
     config = load_config(args.config)
 
     logging.info("Starting main workflow")
@@ -217,59 +304,19 @@ def main():
     filename_to_openai_id = load_documents(config["search_path"])
     logging.info(f"Loaded {len(filename_to_openai_id)} documents")
 
+    Path(config["output_directory"]).mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    path = Path(config["output_directory"]) / f"results_{ts}.txt"
+
     # formatted_results = defaultdict(dict)
-    output_str = ""
-    for filename, vector_store_id in filename_to_openai_id.items():
-        vs = CLIENT.vector_stores.retrieve(vector_store_id)
-        logging.info(vs.file_counts)
-        for base_question in config["questions"]:
-            full_question = config["preamble"] + "\n\n" + base_question
-            logging.info(
-                f"Asking question for file: {filename}, with vector_store_id "
-                f"{vector_store_id} of a question {len(full_question)} "
-                f"characters long"
-            )
-            # this just does the search
-            # search_results = CLIENT.vector_stores.search(
-            #     vector_store_id=vector_store_id, query=full_question
-            # )
-            # answer = response.output[0].content[0].text
-            # logging.info(search_results)
-            # results[base_question][filename] = (
-            #     search_results.data[0].content[0].text
-            # )
-            response = CLIENT.responses.create(
-                model="gpt-5",
-                input=full_question,
-                tools=[
-                    {
-                        "type": "file_search",
-                        "vector_store_ids": [vector_store_id],
-                    }
-                ],
-            )
-            msg = None
-            for item in response.output:
-                if getattr(item, "type", None) == "message":
-                    msg = item
-                    break
-
-            text = msg.content[0].text
-
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            json_str = text[start:end]
-
-            parsed = json.loads(json_str)
-            logging.info(parsed)
-            output_str += format_results(filename, parsed)
-
-            logging.info(f"Finished question for file={filename}")
-        logging.info("Finished this question for one file")
+    run_all(
+        config,
+        filename_to_openai_id,
+        path,
+        max_workers=len(config["questions"] * len(filename_to_openai_id)),
+    )
 
     logging.info("All questions processed")
-
-    write_results(config["output_directory"], output_str)
 
 
 if __name__ == "__main__":
